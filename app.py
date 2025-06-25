@@ -1,31 +1,34 @@
+# app.py  – descriptive Streamlit walkthrough
+
 import streamlit as st, qrcode, io, uuid, json, pathlib
 from syber_core import SyberKey, Bank
 
-st.set_page_config(page_title="SyberKey ↔︎ Bank Demo",
+st.set_page_config(page_title="SyberKey ↔︎ Bank End-to-End Demo",
                    layout="centered", initial_sidebar_state="collapsed")
 
-# ── optional sidebar docs ──────────────────────────────────────────────
+# ── optional sidebar docs ───────────────────────────────────────────────
 readme = pathlib.Path(__file__).with_name("README.md")
 if readme.exists():
     with st.sidebar:
-        st.title("📖 Docs")
+        st.title("Read-Me / Patent Notes")
         st.markdown(readme.read_text())
 
-# ── one-time init ──────────────────────────────────────────────────────
+# ── initialise IdP and Bank once per session ────────────────────────────
 if "sk" not in st.session_state:
     sk   = SyberKey()
     bank = Bank("XYZ_BANK", sk)
 
-    uid  = str(uuid.uuid4())
-    qr0  = sk.enroll(uid, "fingerprint-v1")
-    bank.store_qr(uid, qr0["blob"], qr0["version"])
+    # create a demo user with a random UUID
+    uid = str(uuid.uuid4())
+    first = sk.enroll(uid, "fingerprint-v1")          # QR version 1
+    bank.store_qr(uid, first["blob"], first["version"])
 
     st.session_state.update(
         sk=sk, bank=bank, uid=uid,
-        current_ver=qr0["version"],
-        step2_packet=None,
-        step3_waiting=False,
-        step7_result=None
+        current_ver=first["version"],
+        waiting_for_push=False,
+        packet=None,
+        result=None
     )
 
 sk, bank, uid = st.session_state.sk, st.session_state.bank, st.session_state.uid
@@ -34,66 +37,105 @@ def qr_png(blob):
     buf = io.BytesIO(); qrcode.make(blob).save(buf)
     return buf.getvalue()
 
-# ───────────────────────────────── 0️⃣ Registration ─────────────────────────
-st.header("0️⃣  Registered credentials")
-cols = st.columns([2,1])
-cols[0].write(f"**SyberKey-ID (UUID)**: `{uid}`")
-cols[1].image(qr_png(bank.db[uid]["blob"]), width=120,
-              caption=f"QR v{bank.db[uid]['version']}")
+# ─────────────────────────────────── STEP 0 ──────────────────────────────────
+st.header("Step 0 – Initial Registration")
+st.markdown(
+"""
+* SyberKey captures the user’s biometric sample (simulated by the string `fingerprint-v1`).  
+* SyberKey double-encrypts the sample (toy AES, then Base64) and embeds it into QR **version 1**.  
+* The Bank stores that opaque QR blob; it never sees the raw biometric.  
+""")
+st.write(f"**User’s SyberKey-ID (UUID)**: `{uid}`")
+st.image(qr_png(bank.db[uid]["blob"]),
+         caption=f"QR credential • version {bank.db[uid]['version']}",
+         width=140)
 
 st.divider()
 
-# ───────────────────────────────── 1️⃣ User provides ID ──────────────────────
-st.subheader("1️⃣  User tells Bank: “I want to log in”")
-syber_id = st.text_input("SyberKey-ID received at kiosk", value=uid)
+# ─────────────────────────────────── STEP 1 ──────────────────────────────────
+st.header("Step 1 – User presents SyberKey-ID to the Bank kiosk")
+user_id = st.text_input(
+    "Operator types the SyberKey-ID shown above into the kiosk:",
+    value=uid
+)
 
-# ───────────────────────────────── 2️⃣ Bank builds packet ────────────────────
-if st.button("Send login request ➜"):
-    if syber_id not in bank.db:
-        st.error("Unknown ID – not enrolled.")
+# ─────────────────────────────────── STEP 2 ──────────────────────────────────
+if st.button("Create and send signed login packet"):
+    if user_id not in bank.db:
+        st.error("The Bank has no record of that ID.")
     else:
-        st.session_state.step2_packet = bank.build_packet(syber_id)
-        st.session_state.step3_waiting = True
-        st.session_state.step7_result  = None
+        st.session_state.packet = bank.build_packet(user_id)
+        st.session_state.waiting_for_push = True
+        st.session_state.result = None
 
-# Show step 2 packet if ready
-if st.session_state.step2_packet:
-    st.subheader("2️⃣  Bank → SyberKey payload")
-    st.code(json.dumps(st.session_state.step2_packet, indent=2), language="json")
+# show the packet content
+if st.session_state.packet:
+    st.subheader("Step 2 – Bank → SyberKey  •  Signed JSON payload")
+    st.markdown(
+        """
+        * Bank retrieves the stored QR.  
+        * Bank creates `timestamp` and `nonce` fields.  
+        * Bank signs the entire `payload` with its HMAC key so SyberKey can verify authenticity.
+        """
+    )
+    st.code(json.dumps(st.session_state.packet, indent=2), language="json")
 
-# ───────────────────────────────── 3️⃣ & 4️⃣ Push approval ──────────────────
-if st.session_state.get("step3_waiting"):
-    st.subheader("3️⃣  SyberKey validates & sends push")
-    st.info("Signature ✅  Timestamp ✅ — push sent to user device.")
+# ────────────────────────────────── STEPS 3 & 4 ─────────────────────────────
+if st.session_state.waiting_for_push:
+    st.header("Step 3 – SyberKey validates the packet")
 
-    choice = st.radio("4️⃣  User sees push → choose:", ("Approve", "Deny"),
-                      horizontal=True)
-    if st.button("Respond"):
-        approved = (choice == "Approve")
-        result = sk.handle_login(
-            bank.id, st.session_state.step2_packet, approved
-        )
-        st.session_state.step3_waiting = False
-        st.session_state.step7_result  = result
+    st.markdown(
+        """
+        * Verifies HMAC signature using the shared secret issued during onboarding.  
+        * Confirms the timestamp is within the acceptable window (30 s).  
+        * Confirms the QR blob matches the **active** version stored for this user.  
+        * If all checks succeed, SyberKey sends a push notification to the user’s phone/watch.
+        """
+    )
 
-# ───────────────────────────────── 5-7  Results & rotation ──────────────────
-if st.session_state.step7_result:
-    res = st.session_state.step7_result
+    choice = st.radio("Step 4 – User action on push notification:",
+                      ("Approve login", "Deny login"), horizontal=True)
+    if st.button("User responds"):
+        approved = (choice == "Approve login")
+        response = sk.handle_login(bank.id,
+                                   st.session_state.packet,
+                                   approved)
+        st.session_state.result = response
+        st.session_state.waiting_for_push = False
+
+# ───────────────────────────────── STEPS 5 - 7 ──────────────────────────────
+if st.session_state.result:
+    res = st.session_state.result
+
     if res.get("status") == "success":
-        st.subheader("5-6-7 ✅  Decrypt ✔  Match ✔  Login success")
+        st.header("Steps 5-6-7 – Decryption, biometric match, and success response")
+        st.markdown(
+            """
+            * **Inner decryption** (toy AES) and **outer decryption** (Base64) expose the
+              original biometric bytes.  
+            * SHA-256 hash of decrypted bytes matches the stored template → user identity verified.  
+            * SyberKey returns `{status: success, user_token: JWT-like value}`.  
+            * Bank trusts this response and opens the user’s session.
+            """
+        )
         st.success(f"Session token: `{res['token']}`")
-    elif res.get("status") == "qr_revoked":
-        st.subheader("⟳  QR rotated")
-        st.warning("Old QR rejected. Bank fetches the new active blob.")
-        bank.store_qr(uid, res["blob"], res["version"])
-        st.image(qr_png(res["blob"]), width=120,
-                 caption=f"New QR v{res['version']}")
-        st.info("Now press **Send login request** again.")
-    else:
-        st.subheader("❌  Login failed")
-        st.error(f"Reason: {res['status']}")
 
-    st.session_state.step7_result = None   # clear after showing
+    elif res.get("status") == "qr_revoked":
+        st.header("QR credential was rotated by SyberKey")
+        st.warning(
+            "SyberKey rejects the old QR (perhaps the user re-enrolled or a periodic "
+            "rotation policy triggered). Bank now downloads the **new active QR**."
+        )
+        bank.store_qr(uid, res["blob"], res["version"])
+        st.image(qr_png(res["blob"]), width=140,
+                 caption=f"New QR credential • version {res['version']}")
+        st.info("Repeat Step 1 → Step 2 to log in with the new QR.")
+
+    else:
+        st.header("Login failed")
+        st.error(f"Failure reason reported by SyberKey: **{res['status']}**")
+
+    st.session_state.result = None   # clear after display
 
 st.write("---")
-st.caption("All cryptography is illustrative. Replace toy functions with AES-GCM and RSA-OAEP in production.")
+st.caption("All cryptography in this demo is illustrative. Replace toy functions with AES-GCM and RSA-OAEP in production.")
