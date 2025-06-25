@@ -1,14 +1,16 @@
 """
-Core logic for SyberKey ↔︎ Bank demo
-• Toy crypto (reverse-bytes “AES”, base64, HMAC-SHA256)
-• Tracks QR version so rotation revokes older blobs
+SyberKey ↔︎ Bank demo core (toy crypto)
+
+• SyberKey    – holds biometric templates, issues / rotates QR blobs,
+                verifies signed packets, performs double-decryption & match
+• Bank        – stores only opaque QR blobs (+ version) and signs packets
 """
 
 import base64, hashlib, hmac, json, secrets, time, uuid
 from typing import Dict, Any
 
-# ── trivial “AES” placeholders ────────────────────────────────────────────
-def _toy_aes_enc(b: bytes) -> bytes: return b[::-1]          # reverse
+# ── toy crypto helpers ───────────────────────────────────────────────────
+def _toy_aes_enc(b: bytes) -> bytes: return b[::-1]      # reverse bytes
 def _toy_aes_dec(b: bytes) -> bytes: return b[::-1]
 
 def double_encrypt(data: bytes) -> str:
@@ -24,23 +26,23 @@ def hmac_sign(key: bytes, msg: bytes) -> str:
 def hmac_ok(key: bytes, msg: bytes, sig: str) -> bool:
     return hmac.new(key, msg, hashlib.sha256).hexdigest() == sig
 
-# ── SyberKey IdP ──────────────────────────────────────────────────────────
+# ── SyberKey (IdP) ───────────────────────────────────────────────────────
 class SyberKey:
     def __init__(self):
-        self._templates: Dict[str, str] = {}    # uid → sha256(bio)
-        self._blobs: Dict[str, str]     = {}    # uid → active QR blob
-        self._version: Dict[str, int]   = {}    # uid → int
-        self._bank_keys: Dict[str, bytes] = {}  # bank_id → HMAC key
+        self._templates: Dict[str, str] = {}   # uid → sha256(bio)
+        self._blobs: Dict[str, str]     = {}   # uid → active QR blob
+        self._version: Dict[str, int]   = {}   # uid → int
+        self._bank_keys: Dict[str, bytes] = {} # bank_id → HMAC key
 
-    # ----- enrol / rotate -------------------------------------------------
-    def _issue_blob(self, biometric: str) -> str:
+    # enrol / rotate -------------------------------------------------------
+    def _issue(self, biometric: str) -> str:
         return double_encrypt(biometric.encode())
 
     def enroll(self, uid: str, biometric: str) -> Dict[str, Any]:
         v = self._version.get(uid, 0) + 1
         self._version[uid] = v
         self._templates[uid] = hashlib.sha256(biometric.encode()).hexdigest()
-        blob = self._issue_blob(biometric)
+        blob = self._issue(biometric)
         self._blobs[uid] = blob
         return {"blob": blob, "version": v}
 
@@ -48,27 +50,25 @@ class SyberKey:
         new_bio = f"fingerprint-{uuid.uuid4().hex[:4]}"
         return self.enroll(uid, new_bio)
 
-    # ----- trust relationship with bank ----------------------------------
-    def trust_bank(self, bank_id: str, hmac_key: bytes):
-        self._bank_keys[bank_id] = hmac_key
+    # trust bank -----------------------------------------------------------
+    def trust_bank(self, bank_id: str, key: bytes):
+        self._bank_keys[bank_id] = key
 
-    # ----- login flow -----------------------------------------------------
+    # login ----------------------------------------------------------------
     def handle_login(self, bank_id: str, packet: Dict[str, Any],
                      user_approved: bool):
         key = self._bank_keys.get(bank_id)
         if not key:
             return {"status": "unknown_bank"}
 
-        payload = packet["payload"]
-        if not hmac_ok(key, json.dumps(payload).encode(), packet["signature"]):
+        payload, sig = packet["payload"], packet["signature"]
+        if not hmac_ok(key, json.dumps(payload).encode(), sig):
             return {"status": "bad_sig"}
-
         if abs(time.time() - payload["ts"]) > 30:
             return {"status": "stale_ts"}
 
         uid, qr_blob = payload["uid"], payload["qr"]
         if qr_blob != self._blobs.get(uid):
-            # tell bank the fresh blob + version
             return {"status": "qr_revoked",
                     "blob": self._blobs[uid],
                     "version": self._version[uid]}
@@ -82,14 +82,19 @@ class SyberKey:
 
         return {"status": "success", "token": f"TOKEN-{uuid.uuid4()}"}
 
-# ── Bank RP ───────────────────────────────────────────────────────────────
+# ── Bank (relying party) ─────────────────────────────────────────────────
 class Bank:
     def __init__(self, bank_id: str, sk: SyberKey):
         self.id = bank_id
         self._hkey = secrets.token_bytes(32)
-        self._db: Dict[str, Dict[str, Any]] = {}   # uid → {blob, version}
+        self._db: Dict[str, Dict[str, Any]] = {}  # uid → {blob, version}
         self._sk = sk
         sk.trust_bank(bank_id, self._hkey)
+
+    # expose read-only db property for Streamlit UI
+    @property
+    def db(self):       # <-- fix: Streamlit can call bank.db[…]
+        return self._db
 
     def store_qr(self, uid: str, blob: str, version: int):
         self._db[uid] = {"blob": blob, "version": version}
