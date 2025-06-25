@@ -22,18 +22,6 @@
 | **QR rotation** | If SyberKey rotates to **v2**, the next login shows “QR revoked” → Bank pulls v2 and retries automatically. |
 
 > **Crypto disclaimer** – encryption is illustrative only.  
-> Swap the toy “reverse + Base64” with **AES‑256‑GCM** and **RSA‑OAEP** (or ECIES) to meet the patent’s production spec and achieve the “triple‑encryption” claim.
-
----
-
-## 2 · Components in this demo
-
-| Layer | File / Class | Role |
-|-------|--------------|------|
-| **Identity Provider** | `syber_core.SyberKey` | Holds hashed biometric templates, performs double‑decryption & matching, issues/rotates QR blobs, sends push approvals. |
-| **Relying Party / Bank** | `syber_core.Bank` | Stores only opaque QR blobs (+ version), builds the signed JSON packet for each login. |
-| **Web UI** | `app.py` (Streamlit) | Pretends to be both the kiosk and the user’s phone: • accepts SyberKey‑ID • prints the signed packet • shows push approval controls • displays success/failure & token. |
-| **Toy cryptography** | functions in `syber_core.py` | `_toy_aes_enc` (reverse bytes), `double_encrypt`, HMAC‑SHA256 – easy to audit, easy to swap for real libs later. |
 
 ---
 
@@ -67,39 +55,37 @@ sequenceDiagram
     end
 ```
 
----
-
-## 4 · Production‑hardening checklist
-
-| Gap in demo | Remedy in a real build |
-|-------------|------------------------|
-| **Toy crypto** (`_toy_aes_enc`, Base64) | Use **AES‑256‑GCM** for the inner layer; wrap with **RSA‑OAEP** (or ECIES) as outer layer; optional 3rd envelope for “triple encryption”. |
-| Shared HMAC per bank | Replace with mutual‑TLS or signed JWT assertions from the Bank. |
-| 30 s timestamp window | Tune to ≤ 10 s; add nonce‑replay cache or Redis set. |
-| Push‑fatigue risk | Include terminal/branch context in push UI; require device‑local biometric before “Approve”. |
-| Raw template storage | Encrypt or hash templates at rest in HSM / KMS; purge raw biometrics after QR issuance. |
-
----
-
-### How to run locally
-
-```bash
-git clone https://github.com/your‑org/syber‑demo
-cd syber‑demo
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
 ```
-Navigate to **http://localhost:8501** and follow the numbered banners.
+[1] User tells Bank: “I want to log in”  
+    → Provides their SyberKey ID (e.g., phone number or short code)
 
-### One‑click deploy (Streamlit Cloud)
+[2] Bank App (used by agent/kiosk):
+    → Looks up the stored QR code for this user
+    → Sends to SyberKey Auth Server:
+         {
+           user_id: "abc123",
+           qr_code: "<doubly-encrypted-data>",
+           timestamp: "2025-06-24T20:00",
+           nonce: "random123",
+           signature: BankSignature(...)
+         }
 
-1. Push the repo to GitHub.  
-2. Go to <https://share.streamlit.io>. Click **New app**.  
-3. Select repo / branch / `app.py` → **Deploy**.  
+[3] SyberKey receives the request
+    → Validates that it came from a trusted Bank (via signature)
+    → Sends a push notification to user's phone/watch:
+       “Do you approve login to XYZ Bank?”
 
-You’ll receive a public HTTPS URL – share it with stakeholders; no install required.
+[4] User sees this in SyberKey app
+    → Taps "Approve"
 
----
+[5] SyberKey decrypts QR code:
+    → Inner + outer decryption
+    → Matches biometric with stored template
 
-_*This demo is intentionally lightweight to emphasise the patented control points. Replace the placeholder crypto with production‑grade libraries before real deployments.*_
+[6] If match is successful:
+    → SyberKey sends: `{ status: "success", user_token: <signed_JWT> }` back to Bank
+
+[7] Bank App:
+    → Trusts SyberKey's response
+    → Logs user in
+```
