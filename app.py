@@ -1,5 +1,10 @@
 import streamlit as st, qrcode, io, uuid, json
 from syber_core import SyberKey, Bank
+import pathlib
+
+st.sidebar.title("📖 Docs")
+with open(pathlib.Path(__file__).parent / "README.md") as f:
+    st.sidebar.markdown(f.read())
 
 st.set_page_config(page_title="SyberKey ↔︎ Bank Demo",
                    layout="centered", initial_sidebar_state="collapsed")
