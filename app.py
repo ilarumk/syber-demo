@@ -31,7 +31,8 @@ def show_qr(blob, ver):
 # ---------- 0️⃣ Registration banner ----------
 with st.expander("0️⃣  Registered credentials", expanded=True):
     st.write(f"**SyberKey-ID**: `{uid}`")
-    show_qr(bank._db[uid]["blob"], bank._db[uid]["version"])
+    show_qr(bank.db[uid]["blob"], bank.db[uid]["version"])
+    
 
 # ---------- ① Kiosk input ----------
 st.header("①  Bank kiosk")
